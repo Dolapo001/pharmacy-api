@@ -215,13 +215,16 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-// Health check endpoint
+// Health endpoint
 app.MapGet("/health", () => Results.Ok(new { 
     status = "healthy", 
     db = csb.Host,
     database = csb.Database,
     timestamp = DateTime.UtcNow 
 }));
+
+// NEW: Root endpoint to fix 404 error
+app.MapGet("/", () => Results.Redirect("/health"));
 
 app.Run();
 
