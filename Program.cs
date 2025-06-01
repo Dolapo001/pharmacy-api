@@ -206,20 +206,14 @@ var app = builder.Build();
 // Apply database migrations
 await ApplyMigrationsAsync(app.Services);
 
-// Configure Swagger based on environment
-var enableSwagger = app.Environment.IsDevelopment() || 
-                    Environment.GetEnvironmentVariable("ENABLE_SWAGGER") == "true";
-
-if (enableSwagger)
+// ALWAYS ENABLE SWAGGER
+app.UseSwagger();
+app.UseSwaggerUI(c =>
 {
-    app.UseSwagger();
-    app.UseSwaggerUI(c =>
-    {
-        c.SwaggerEndpoint("/swagger/v1/swagger.json", "Pharmacy API V1");
-        c.RoutePrefix = "swagger"; // Access at /swagger
-        c.ConfigObject.AdditionalItems.Add("persistAuthorization", "true");
-    });
-}
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Pharmacy API V1");
+    c.RoutePrefix = "swagger"; // Access at /swagger
+    c.ConfigObject.AdditionalItems.Add("persistAuthorization", "true");
+});
 
 app.UseHttpsRedirection();
 app.UseCors("AllowFrontend");
@@ -232,29 +226,11 @@ app.MapGet("/health", () => Results.Ok(new {
     status = "healthy", 
     db = csb.Host,
     database = csb.Database,
-    timestamp = DateTime.UtcNow,
-    swaggerEnabled = enableSwagger
+    timestamp = DateTime.UtcNow
 }));
 
-// Root endpoint with smart redirection
-app.MapGet("/", () => {
-    if (enableSwagger)
-    {
-        return Results.Redirect("/swagger");
-    }
-    return Results.Ok(new {
-        service = "Pharmacy API",
-        status = "running",
-        version = "v1",
-        health_check = "/health",
-        documentation = "Swagger is disabled in production. Set ENABLE_SWAGGER=true to enable."
-    });
-});
-
-// Add explicit Swagger endpoint redirect
-app.MapGet("/swagger", () => enableSwagger 
-    ? Results.Redirect("/swagger/index.html") 
-    : Results.NotFound("Swagger is disabled in production"));
+// Root endpoint redirects to Swagger
+app.MapGet("/", () => Results.Redirect("/swagger"));
 
 app.Run();
 
