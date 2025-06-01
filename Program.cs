@@ -9,25 +9,36 @@ using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Validate configuration
-var connString = builder.Configuration.GetConnectionString("DefaultConnection");
+// Get connection string - try DATABASE_URL first (common in production), then fallback to DefaultConnection
+var connString = Environment.GetEnvironmentVariable("DATABASE_URL") 
+    ?? builder.Configuration.GetConnectionString("DefaultConnection");
+
 if (string.IsNullOrEmpty(connString))
 {
-    throw new InvalidOperationException("Connection string 'DefaultConnection' is missing!");
+    throw new InvalidOperationException("Connection string is missing! Set DATABASE_URL environment variable or DefaultConnection in appsettings.json");
 }
 
-var jwtKey = builder.Configuration["Jwt:Key"];
+// Convert Heroku/Render style DATABASE_URL to connection string format if needed
+if (connString.StartsWith("postgres://"))
+{
+    connString = ConvertDatabaseUrl(connString);
+}
+
+var jwtKey = builder.Configuration["Jwt:Key"] ?? Environment.GetEnvironmentVariable("JWT_KEY");
 if (string.IsNullOrEmpty(jwtKey) || jwtKey.Length < 32)
 {
     throw new InvalidOperationException(
-        "JWT Key must be at least 32 characters long. Check appsettings.json");
+        "JWT Key must be at least 32 characters long. Set JWT_KEY environment variable or check appsettings.json");
 }
 
-Console.WriteLine($"Using DB: {connString.Split(';')[0]}");
+Console.WriteLine($"Using DB: {GetDbHostFromConnectionString(connString)}");
 Console.WriteLine($"JWT Issuer: {builder.Configuration["Jwt:Issuer"]}");
 
-// Test DB connection
-TestDbConnection(connString);
+// Only test DB connection in development or if explicitly requested
+if (builder.Environment.IsDevelopment() || Environment.GetEnvironmentVariable("TEST_DB_CONNECTION") == "true")
+{
+    TestDbConnection(connString);
+}
 
 // Add services to the container.
 builder.Services.AddControllers();
@@ -88,6 +99,7 @@ else
         {
             o.EnableRetryOnFailure();
             o.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
+            o.CommandTimeout(30); // Add command timeout for production
         }));
 }
 
@@ -120,6 +132,7 @@ builder.Services.AddAuthorization(options =>
 
 // CORS Configuration
 var allowedOrigins = builder.Configuration["AllowedOrigins"]?.Split(';') 
+    ?? Environment.GetEnvironmentVariable("ALLOWED_ORIGINS")?.Split(';')
     ?? new[] { "http://localhost:3000" };
 
 builder.Services.AddCors(options =>
@@ -143,7 +156,7 @@ builder.Services.AddLogging(logging =>
 var app = builder.Build();
 
 // Apply database migrations
-ApplyMigrations(app.Services);
+await ApplyMigrationsAsync(app.Services);
 
 // Middleware Pipeline
 if (app.Environment.IsDevelopment())
@@ -161,9 +174,37 @@ app.UseCors("AllowFrontend");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+
+// Add health check endpoint
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
+
 app.Run();
 
 // Helper methods
+string ConvertDatabaseUrl(string databaseUrl)
+{
+    // Convert postgres://user:password@host:port/database to connection string format
+    var uri = new Uri(databaseUrl);
+    var db = uri.AbsolutePath.Trim('/');
+    var userInfo = uri.UserInfo.Split(':');
+    
+    return $"Host={uri.Host};Port={uri.Port};Database={db};Username={userInfo[0]};Password={userInfo[1]};SSL Mode=Require;Trust Server Certificate=true";
+}
+
+string GetDbHostFromConnectionString(string connectionString)
+{
+    try
+    {
+        var parts = connectionString.Split(';');
+        var hostPart = parts.FirstOrDefault(p => p.Trim().StartsWith("Host=", StringComparison.OrdinalIgnoreCase));
+        return hostPart?.Split('=')[1] ?? "Unknown";
+    }
+    catch
+    {
+        return "Unknown";
+    }
+}
+
 void TestDbConnection(string connectionString)
 {
     try
@@ -179,40 +220,47 @@ void TestDbConnection(string connectionString)
     }
 }
 
-void ApplyMigrations(IServiceProvider services)
+async Task ApplyMigrationsAsync(IServiceProvider services)
 {
     using var scope = services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<PharmacyContext>();
     var env = scope.ServiceProvider.GetRequiredService<IWebHostEnvironment>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
     
     try
     {
-        Console.WriteLine("Applying migrations...");
-        db.Database.Migrate();
-        Console.WriteLine("✅ Database migrations applied!");
+        logger.LogInformation("Checking database connection...");
+        
+        // Test connection first
+        await db.Database.CanConnectAsync();
+        logger.LogInformation("Database connection successful!");
+        
+        logger.LogInformation("Applying migrations...");
+        await db.Database.MigrateAsync();
+        logger.LogInformation("✅ Database migrations applied successfully!");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"❌ Migration failed: {ex.Message}");
+        logger.LogError(ex, "❌ Migration failed: {Message}", ex.Message);
         
         if (env.IsDevelopment())
         {
-            Console.WriteLine("Resetting database in development...");
+            logger.LogWarning("Attempting to reset database in development...");
             try
             {
-                db.Database.EnsureDeleted();
-                db.Database.Migrate();
-                Console.WriteLine("✅ Database reset and migrated!");
+                await db.Database.EnsureDeletedAsync();
+                await db.Database.MigrateAsync();
+                logger.LogInformation("✅ Database reset and migrated successfully!");
             }
             catch (Exception resetEx)
             {
-                Console.WriteLine($"❌ Database reset failed: {resetEx.Message}");
+                logger.LogError(resetEx, "❌ Database reset failed: {Message}", resetEx.Message);
                 throw;
             }
         }
         else
         {
-            Console.WriteLine("❌ Cannot reset database in production");
+            logger.LogError("❌ Cannot reset database in production environment");
             throw;
         }
     }
