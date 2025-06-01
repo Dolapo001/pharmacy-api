@@ -2,7 +2,8 @@
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /app
 
-# Copy csproj and restore as distinct layers
+# Copy solution and project files
+COPY *.sln ./
 COPY *.csproj ./
 RUN dotnet restore
 
