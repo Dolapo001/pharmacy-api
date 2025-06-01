@@ -6,6 +6,7 @@ using Npgsql;
 using PharmacyAPI.Data;
 using PharmacyAPI.Services;
 using System.Text;
+using System.Text.RegularExpressions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,13 +23,20 @@ if (string.IsNullOrWhiteSpace(rawConnString))
 
 var connString = rawConnString.Trim();
 
+// Remove any surrounding quotes that might be present
+connString = connString.Trim('"').Trim('\'');
+
+Console.WriteLine($"Raw connection string: {MaskPassword(connString)}");
+
 // 2. Convert Heroku/Render style URL if needed
-if (connString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase))
+if (connString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
+    connString.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
 {
     try
     {
         connString = ConvertDatabaseUrl(connString);
-        Console.WriteLine("✅ Converted Heroku-style database URL");
+        Console.WriteLine("✅ Converted Heroku-style database URL to standard format");
+        Console.WriteLine($"Converted connection string: {MaskPassword(connString)}");
     }
     catch (Exception ex)
     {
@@ -48,6 +56,21 @@ catch (Exception ex)
 {
     Console.WriteLine($"❌ FATAL: Invalid connection string format: {ex.Message}");
     Console.WriteLine($"Connection string: {MaskPassword(connString)}");
+    
+    // Try to diagnose the issue
+    if (string.IsNullOrWhiteSpace(connString))
+    {
+        Console.WriteLine("❌ Connection string is empty or whitespace");
+    }
+    else if (!connString.Contains(';') && !connString.Contains('='))
+    {
+        Console.WriteLine("❌ Connection string appears to be in URL format but wasn't converted");
+    }
+    else if (!connString.Contains("Host=", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine("❌ Connection string is missing required 'Host' parameter");
+    }
+    
     throw;
 }
 
@@ -205,14 +228,29 @@ app.Run();
 // Helper methods
 string ConvertDatabaseUrl(string databaseUrl)
 {
+    // Handle both postgres:// and postgresql:// formats
+    if (databaseUrl.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
+    {
+        databaseUrl = "postgres://" + databaseUrl.Substring("postgresql://".Length);
+    }
+    
     var uri = new Uri(databaseUrl);
+    var userInfo = uri.UserInfo.Split(':');
+    
+    if (userInfo.Length != 2)
+    {
+        throw new FormatException("Invalid user info format in database URL");
+    }
+    
+    var port = uri.Port > 0 ? uri.Port : 5432;
+    
     return new NpgsqlConnectionStringBuilder
     {
         Host = uri.Host,
-        Port = uri.Port,
+        Port = port,
         Database = uri.AbsolutePath.Trim('/'),
-        Username = uri.UserInfo.Split(':')[0],
-        Password = uri.UserInfo.Split(':')[1],
+        Username = userInfo[0],
+        Password = userInfo[1],
         SslMode = SslMode.Require,
         TrustServerCertificate = true
     }.ConnectionString;
@@ -222,9 +260,14 @@ void TestDbConnection(NpgsqlConnectionStringBuilder csBuilder)
 {
     try
     {
+        Console.WriteLine("Testing database connection...");
         using var conn = new NpgsqlConnection(csBuilder.ConnectionString);
         conn.Open();
-        Console.WriteLine("✅ Database connection test successful!");
+        
+        using var cmd = new NpgsqlCommand("SELECT version();", conn);
+        var version = cmd.ExecuteScalar()?.ToString();
+        
+        Console.WriteLine($"✅ Database connection test successful! PostgreSQL version: {version}");
     }
     catch (Exception ex)
     {
@@ -237,16 +280,25 @@ string MaskPassword(string connectionString)
 {
     try
     {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        if (!string.IsNullOrEmpty(builder.Password))
+        // First try to parse as key-value string
+        if (connectionString.Contains('='))
         {
-            builder.Password = "*****";
+            var builder = new NpgsqlConnectionStringBuilder(connectionString);
+            if (!string.IsNullOrEmpty(builder.Password))
+            {
+                builder.Password = "*****";
+            }
+            return builder.ConnectionString;
         }
-        return builder.ConnectionString;
-    }
-    catch
-    {
-        // If parsing fails, return masked version
+        
+        // Handle URL format
+        if (connectionString.Contains("://"))
+        {
+            var regex = new Regex(@"(.*://[^:]+:)([^@]+)(@.*)");
+            return regex.Replace(connectionString, "$1*****$3");
+        }
+        
+        // Fallback: simple masking
         var idx = connectionString.IndexOf("Password=", StringComparison.OrdinalIgnoreCase);
         if (idx > 0)
         {
@@ -255,7 +307,13 @@ string MaskPassword(string connectionString)
             var password = endIdx > 0 ? sub.Substring(0, endIdx) : sub;
             return connectionString.Replace(password, "*****");
         }
+        
         return connectionString;
+    }
+    catch
+    {
+        // If everything fails, return a masked version
+        return Regex.Replace(connectionString, @"(password=)[^;]+", "$1*****", RegexOptions.IgnoreCase);
     }
 }
 
