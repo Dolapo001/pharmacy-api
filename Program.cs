@@ -185,8 +185,19 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 // Authorization Policies
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
-    options.AddPolicy("StaffOrAdmin", policy => policy.RequireRole("Admin", "Staff"));
+    options.AddPolicy("AdminOnly", policy => 
+        policy.RequireAssertion(context =>
+            context.User.IsInRole("Admin") || 
+            context.User.IsInRole("admin")
+        ));
+    
+    options.AddPolicy("StaffOrAdmin", policy => 
+        policy.RequireAssertion(context =>
+            context.User.IsInRole("Admin") ||
+            context.User.IsInRole("admin") ||
+            context.User.IsInRole("Staff") ||
+            context.User.IsInRole("staff")
+        ));
 });
 
 // CORS Configuration

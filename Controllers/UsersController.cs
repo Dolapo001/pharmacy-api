@@ -8,7 +8,7 @@ namespace PharmacyAPI.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
-    [Authorize(Roles = "Admin")] // Restrict to admins only
+    [Authorize(Policy = "AdminOnly")] // Use policy name
     public class UsersController : ControllerBase
     {
         private readonly PharmacyContext _context;
