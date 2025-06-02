@@ -7,8 +7,16 @@ using PharmacyAPI.Data;
 using PharmacyAPI.Services;
 using System.Text;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.DataProtection;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Kestrel for Render deployment
+builder.WebHost.ConfigureKestrel(options =>
+{
+    var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+    options.ListenAnyIP(int.Parse(port));
+});
 
 // 1. Get and validate connection string
 var rawConnString = Environment.GetEnvironmentVariable("DATABASE_URL") 
@@ -95,49 +103,52 @@ if (builder.Environment.IsDevelopment() || Environment.GetEnvironmentVariable("T
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
-// Swagger Configuration - Always generate Swagger JSON
-builder.Services.AddSwaggerGen(c =>
+// Swagger Configuration - Only in development or when explicitly enabled
+if (builder.Environment.IsDevelopment() || Environment.GetEnvironmentVariable("ENABLE_SWAGGER") == "true")
 {
-    c.SwaggerDoc("v1", new OpenApiInfo
+    builder.Services.AddSwaggerGen(c =>
     {
-        Title = "Pharmacy API",
-        Version = "v1",
-        Description = "API for managing pharmacy shop system"
-    });
-    
-    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
-    {
-        Description = "JWT Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {token}\"",
-        Name = "Authorization",
-        In = ParameterLocation.Header,
-        Type = SecuritySchemeType.Http,
-        Scheme = "bearer",
-        BearerFormat = "JWT"
-    });
-    
-    c.AddSecurityRequirement(new OpenApiSecurityRequirement
-    {
+        c.SwaggerDoc("v1", new OpenApiInfo
         {
-            new OpenApiSecurityScheme
+            Title = "Pharmacy API",
+            Version = "v1",
+            Description = "API for managing pharmacy shop system"
+        });
+        
+        c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+        {
+            Description = "JWT Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {token}\"",
+            Name = "Authorization",
+            In = ParameterLocation.Header,
+            Type = SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT"
+        });
+        
+        c.AddSecurityRequirement(new OpenApiSecurityRequirement
+        {
             {
-                Reference = new OpenApiReference
+                new OpenApiSecurityScheme
                 {
-                    Type = ReferenceType.SecurityScheme,
-                    Id = "Bearer"
-                }
-            },
-            Array.Empty<string>()
+                    Reference = new OpenApiReference
+                    {
+                        Type = ReferenceType.SecurityScheme,
+                        Id = "Bearer"
+                    }
+                },
+                Array.Empty<string>()
+            }
+        });
+        
+        // Include XML comments if available
+        var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+        var xmlPath = System.IO.Path.Combine(AppContext.BaseDirectory, xmlFile);
+        if (System.IO.File.Exists(xmlPath))
+        {
+            c.IncludeXmlComments(xmlPath);
         }
     });
-    
-    // Include XML comments if available
-    var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
-    var xmlPath = System.IO.Path.Combine(AppContext.BaseDirectory, xmlFile);
-    if (System.IO.File.Exists(xmlPath))
-    {
-        c.IncludeXmlComments(xmlPath);
-    }
-});
+}
 
 // Database Configuration
 builder.Services.AddDbContext<PharmacyContext>(options => 
@@ -178,7 +189,7 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("StaffOrAdmin", policy => policy.RequireRole("Admin", "Staff"));
 });
 
-// CORS Configuration - FIXED to allow multiple origins including yours
+// CORS Configuration
 var allowedOrigins = new List<string>();
 
 // Get origins from configuration/environment
@@ -191,18 +202,20 @@ if (configOrigins != null)
 }
 
 // Add common development origins
-var devOrigins = new[]
+if (builder.Environment.IsDevelopment())
 {
-    "http://localhost:3000",
-    "http://localhost:5173", // Vite default
-    "http://localhost:8080", // Vue CLI default
-    "http://127.0.0.1:5500", // Live Server default
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:8080",
-    "http://127.0.0.1:5173"
-};
-
-allowedOrigins.AddRange(devOrigins);
+    var devOrigins = new[]
+    {
+        "http://localhost:3000",
+        "http://localhost:5173", // Vite default
+        "http://localhost:8080", // Vue CLI default
+        "http://127.0.0.1:5500", // Live Server default
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:5173"
+    };
+    allowedOrigins.AddRange(devOrigins);
+}
 
 // Remove duplicates and empty entries
 allowedOrigins = allowedOrigins.Where(o => !string.IsNullOrWhiteSpace(o)).Distinct().ToList();
@@ -223,19 +236,21 @@ builder.Services.AddCors(options =>
         else
         {
             // In production, use specific origins
-            policy.WithOrigins(allowedOrigins.ToArray())
-                  .AllowAnyMethod()
-                  .AllowAnyHeader()
-                  .AllowCredentials();
+            if (allowedOrigins.Any())
+            {
+                policy.WithOrigins(allowedOrigins.ToArray())
+                      .AllowAnyMethod()
+                      .AllowAnyHeader()
+                      .AllowCredentials();
+            }
+            else
+            {
+                // Fallback: allow any origin if none specified (not recommended for production)
+                policy.AllowAnyOrigin()
+                      .AllowAnyMethod()
+                      .AllowAnyHeader();
+            }
         }
-    });
-    
-    // Add a more permissive policy for development
-    options.AddPolicy("Development", policy =>
-    {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
     });
 });
 
@@ -246,31 +261,35 @@ builder.Services.AddLogging(logging =>
     logging.AddDebug();
 });
 
+// Configure Data Protection for container environments
+builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo("/tmp/keys"))
+    .SetApplicationName("PharmacyAPI");
+
 var app = builder.Build();
 
 // Apply database migrations
 await ApplyMigrationsAsync(app.Services);
 
-// ALWAYS ENABLE SWAGGER
-app.UseSwagger();
-app.UseSwaggerUI(c =>
+// Configure Swagger based on environment
+if (app.Environment.IsDevelopment() || Environment.GetEnvironmentVariable("ENABLE_SWAGGER") == "true")
 {
-    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Pharmacy API V1");
-    c.RoutePrefix = "swagger"; // Access at /swagger
-    c.ConfigObject.AdditionalItems.Add("persistAuthorization", "true");
-});
-
-app.UseHttpsRedirection();
-
-// Use appropriate CORS policy based on environment
-if (app.Environment.IsDevelopment())
-{
-    app.UseCors("Development");
+    app.UseSwagger();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "Pharmacy API V1");
+        c.RoutePrefix = "swagger";
+        c.ConfigObject.AdditionalItems.Add("persistAuthorization", "true");
+    });
 }
-else
+
+// Don't use HTTPS redirection in production containers unless HTTPS is properly configured
+if (builder.Environment.IsDevelopment())
 {
-    app.UseCors("AllowFrontend");
+    app.UseHttpsRedirection();
 }
+
+app.UseCors("AllowFrontend");
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -283,12 +302,31 @@ app.MapGet("/health", () => Results.Ok(new {
     database = csb.Database,
     timestamp = DateTime.UtcNow,
     environment = app.Environment.EnvironmentName,
-    allowedOrigins = allowedOrigins
+    allowedOrigins = allowedOrigins,
+    port = Environment.GetEnvironmentVariable("PORT") ?? "8080"
 }));
 
-// Root endpoint redirects to Swagger
-app.MapGet("/", () => Results.Redirect("/swagger"));
+// Root endpoint
+app.MapGet("/", () => 
+{
+    if (app.Environment.IsDevelopment() || Environment.GetEnvironmentVariable("ENABLE_SWAGGER") == "true")
+    {
+        return Results.Redirect("/swagger");
+    }
+    else
+    {
+        return Results.Ok(new { 
+            message = "Pharmacy API is running", 
+            status = "healthy",
+            endpoints = new { 
+                health = "/health",
+                api = "/api"
+            }
+        });
+    }
+});
 
+Console.WriteLine($"Starting application on port {Environment.GetEnvironmentVariable("PORT") ?? "8080"}");
 app.Run();
 
 // Helper methods
