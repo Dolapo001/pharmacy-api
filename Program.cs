@@ -178,19 +178,64 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("StaffOrAdmin", policy => policy.RequireRole("Admin", "Staff"));
 });
 
-// CORS Configuration
-var allowedOrigins = builder.Configuration["AllowedOrigins"]?.Split(';') 
-    ?? Environment.GetEnvironmentVariable("ALLOWED_ORIGINS")?.Split(';')
-    ?? new[] { "http://localhost:3000" };
+// CORS Configuration - FIXED to allow multiple origins including yours
+var allowedOrigins = new List<string>();
+
+// Get origins from configuration/environment
+var configOrigins = builder.Configuration["AllowedOrigins"]?.Split(';') 
+    ?? Environment.GetEnvironmentVariable("ALLOWED_ORIGINS")?.Split(';');
+
+if (configOrigins != null)
+{
+    allowedOrigins.AddRange(configOrigins);
+}
+
+// Add common development origins
+var devOrigins = new[]
+{
+    "http://localhost:3000",
+    "http://localhost:5173", // Vite default
+    "http://localhost:8080", // Vue CLI default
+    "http://127.0.0.1:5500", // Live Server default
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:5173"
+};
+
+allowedOrigins.AddRange(devOrigins);
+
+// Remove duplicates and empty entries
+allowedOrigins = allowedOrigins.Where(o => !string.IsNullOrWhiteSpace(o)).Distinct().ToList();
+
+Console.WriteLine($"Allowed CORS origins: {string.Join(", ", allowedOrigins)}");
 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
     {
-        policy.WithOrigins(allowedOrigins)
+        if (builder.Environment.IsDevelopment())
+        {
+            // In development, be more permissive
+            policy.AllowAnyOrigin()
+                  .AllowAnyMethod()
+                  .AllowAnyHeader();
+        }
+        else
+        {
+            // In production, use specific origins
+            policy.WithOrigins(allowedOrigins.ToArray())
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+        }
+    });
+    
+    // Add a more permissive policy for development
+    options.AddPolicy("Development", policy =>
+    {
+        policy.AllowAnyOrigin()
               .AllowAnyMethod()
-              .AllowAnyHeader()
-              .AllowCredentials();
+              .AllowAnyHeader();
     });
 });
 
@@ -216,7 +261,17 @@ app.UseSwaggerUI(c =>
 });
 
 app.UseHttpsRedirection();
-app.UseCors("AllowFrontend");
+
+// Use appropriate CORS policy based on environment
+if (app.Environment.IsDevelopment())
+{
+    app.UseCors("Development");
+}
+else
+{
+    app.UseCors("AllowFrontend");
+}
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
@@ -226,7 +281,9 @@ app.MapGet("/health", () => Results.Ok(new {
     status = "healthy", 
     db = csb.Host,
     database = csb.Database,
-    timestamp = DateTime.UtcNow
+    timestamp = DateTime.UtcNow,
+    environment = app.Environment.EnvironmentName,
+    allowedOrigins = allowedOrigins
 }));
 
 // Root endpoint redirects to Swagger
