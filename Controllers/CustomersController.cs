@@ -39,7 +39,7 @@ namespace PharmacyAPI.Controllers
         public async Task<ActionResult<int>> GetCustomerCount()
         {
             return await _context.Customers
-                .Where(c => c.IsActive) // Only count active customers
+                // .Where(c => c.IsActive) // Only count active customers
                 .CountAsync();
         }
         
