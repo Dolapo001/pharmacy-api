@@ -229,7 +229,11 @@ if (builder.Environment.IsDevelopment())
 }
 
 // Remove duplicates and empty entries
-allowedOrigins = allowedOrigins.Where(o => !string.IsNullOrWhiteSpace(o)).Distinct().ToList();
+allowedOrigins = allowedOrigins
+    .Where(o => !string.IsNullOrWhiteSpace(o))
+    .Select(o => o.Trim().TrimEnd('/')) // Remove trailing slashes
+    .Distinct()
+    .ToList();
 
 Console.WriteLine($"Allowed CORS origins: {string.Join(", ", allowedOrigins)}");
 
@@ -300,8 +304,28 @@ if (builder.Environment.IsDevelopment())
     app.UseHttpsRedirection();
 }
 
-app.UseCors("AllowFrontend");
+// 1. ADD MIDDLEWARE TO HANDLE OPTIONS REQUESTS
+app.Use(async (context, next) =>
+{
+    var origin = context.Request.Headers["Origin"];
+    if (!string.IsNullOrEmpty(origin) && allowedOrigins.Contains(origin))
+    {
+        context.Response.Headers.Add("Access-Control-Allow-Origin", origin);
+        context.Response.Headers.Add("Access-Control-Allow-Credentials", "true");
+    }
+    
+    if (context.Request.Method == "OPTIONS")
+    {
+        context.Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        context.Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        context.Response.StatusCode = 200;
+        return;
+    }
+    
+    await next();
+});
 
+app.UseCors("AllowFrontend");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
