@@ -20,6 +20,7 @@ namespace PharmacyAPI.Controllers
         }
         
         [HttpGet]
+        [AllowAnonymous]
         public async Task<ActionResult<IEnumerable<MedicineResponseDTO>>> GetMedicines()
         {
             var medicines = await _context.Medicines
